@@ -14,3 +14,10 @@ Zauzeti pinovi su:
                   za Touch: RC13, RC14
                   za Uart: RF2, RF3
                   za Buzzer: RA11
+
+update 29.12.2020.
+	radi servo ali brljavi, hoce da se cima levo desno
+	mq3 radi lepo
+	idalje menja frekvenciju kako njemu dodje
+	uart varira izmedju 2400 i 4800 ne moze da se predvidi
+
