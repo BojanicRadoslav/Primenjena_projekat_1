@@ -4,6 +4,8 @@
 #include <string.h>
 #include "driverGLCD.h"
 #include "adc.h"
+#define servo_min 11
+#define servo_max 80
 
 enum strana{tastatura, settings, stats};
 
@@ -26,23 +28,36 @@ unsigned int alarm = 0;
 unsigned int buzzer_counter = 0;
 const char pin[4]="1234";
 
+unsigned int mq3_threshold = 2000;
+unsigned int mq3_value = 0;
+unsigned int mq3_current = 0;
+unsigned int mq3_last = 0;
+unsigned int mq3_timer = 0;
+unsigned int mq3_timer_sec = 0;
+unsigned int mq3_enable = 1;
+
 //const unsigned int ADC_THRESHOLD = 900; 
 const unsigned int AD_Xmin =314;
 const unsigned int AD_Xmax =4095;
 const unsigned int AD_Ymin =688;
 const unsigned int AD_Ymax =4035;
 
-unsigned int sirovi0,sirovi1;
+unsigned int sirovi0,sirovi1, sirovi2;
 unsigned int broj,broj1,broj2,temp0,temp1; 
+
+int servo_counter = 0;
+int servo_pos = servo_min;
+int pomocni_counter = 0;
+int servo_enable = 0;
 
 //#define DRIVE_A PORTBbits.RB10
 //#define DRIVE_B PORTCbits.RC13
 #define DRIVE_A PORTCbits.RC13
 #define DRIVE_B PORTCbits.RC14
 
-#define TMR2_period 333 /*  Fosc = 3.3333MHz,
-					          1/Fosc = 0.3us !!!, 0.3us * 3333 = 1ms  */
-
+#define TMR2_period 300 /*  Fosc = 3.3333MHz,
+					          1/Fosc = 0.3us !!!, 0.3us * 300 = 9us  */
+#define TMR1_period 100
 
 void Init_T2(void)
 {
@@ -58,10 +73,28 @@ void Init_T2(void)
 	T2CONbits.TON = 1; // T2 on 
 }
 
+void servo(int pos){
+    servo_enable = 1;
+    pomocni_counter = 0;
+    servo_pos = pos;
+}
+int c = 0;
 void __attribute__ ((__interrupt__)) _T2Interrupt(void) // svakih 1ms
 {
 
      TMR2 =0;
+     
+    if (mq3_enable == 0){
+         mq3_timer++;
+     }
+    if(mq3_timer >= 1000){
+        mq3_timer_sec++;
+        mq3_timer = 0;
+    }
+    if(mq3_timer_sec >= 30){
+        mq3_timer_sec == 0;
+        mq3_enable = 1;
+    }
     
     if(silent==0){
         
@@ -73,7 +106,42 @@ void __attribute__ ((__interrupt__)) _T2Interrupt(void) // svakih 1ms
         }
         else LATAbits.LATA11=0;
     }
+    
     IFS0bits.T2IF = 0; 
+       
+}
+
+void Init_T1(void)
+{
+	TMR1 = 0;
+	PR1 = TMR1_period;
+	
+	T1CONbits.TCS = 0; // 0 = Internal clock (FOSC/4)
+	//IPC1bits.T2IP = 3 // T2 interrupt pririty (0-7)
+	//SRbits.IPL = 3; // CPU interrupt priority is 3(11)
+	IFS0bits.T1IF = 0; // clear interrupt flag
+	IEC0bits.T1IE = 1; // enable interrupt
+
+	T1CONbits.TON = 1; // T2 on 
+}
+
+void __attribute__ ((__interrupt__)) _T1Interrupt(void) // svakih 1ms
+{
+    if(servo_enable == 1){
+        TMR1 = 0;
+        if(servo_counter < servo_pos) LATDbits.LATD9 = 1;
+        else LATDbits.LATD9 = 0;
+
+        if(servo_counter == 200){
+            servo_counter = 0;
+            pomocni_counter++;
+        }
+        
+        if(pomocni_counter == 50) servo_enable = 0;
+        servo_counter++;
+    }
+     
+    IFS0bits.T1IF = 0; 
        
 }
 
@@ -81,6 +149,7 @@ void trigger_pir(){
     if(alarm_enable == 1){
         pir_count++;
         alarm = 1;
+        servo(servo_max);
         WriteStringToUART1("ALARM: Detektovan pokret\n");
     }
 }
@@ -89,6 +158,7 @@ void trigger_mq3(){
     if(alarm_enable == 1){
         mq3_count++;
         alarm = 1;
+        servo(servo_max);
         WriteStringToUART1("ALARM: Detektovan dim\n");
     }
 }
@@ -97,6 +167,7 @@ void trigger_faza(){
     if(alarm_enable == 1){
         faza_count++;
         alarm = 1;
+        servo(servo_max);
         WriteStringToUART1("ALARM: Detektovan nestanak faze\n");
     }
 }
@@ -129,9 +200,56 @@ void initUART1(void)
     U1STAbits.UTXEN=1;//ukljucujemo predaju
 }
 
+void writeStatsToUART1(){
+    
+    int mq3_percent = 0;
+    int faza_percent = 0;
+    int pir_percent = 0;
+    int pin_percent = 0;
+    if(mq3_count+faza_count+pir_count+pin_count != 0){
+        mq3_percent = mq3_count*100/(mq3_count+faza_count+pir_count+pin_count);
+        faza_percent = faza_count*100/(mq3_count+faza_count+pir_count+pin_count);
+        pir_percent = pir_count*100/(mq3_count+faza_count+pir_count+pin_count);
+        pin_percent = pin_count*(100)/(mq3_count+faza_count+pir_count+pin_count);
+    }else{
+        WriteStringToUART1("---STATISTIKA---\n   Gas: 0 %\n   RST: 0 %\n   Mot: 0 %\n   Pin: 0 %\n");
+        WriteStringToUART1("----------------\n");
+        return 0;
+    }
+    
+    char buff[100];
+    sprintf(buff, "---STATISTIKA---\n   Gas: %d %%\n   RST: %d %%\n   Mot: %d %%\n   Pin: %d %%\n", mq3_percent, faza_percent, pir_percent, pin_percent);
+    WriteStringToUART1(buff);
+    WriteStringToUART1("----------------\n");
+}
+char msg[100];
+int char_count = 0;
 void __attribute__((__interrupt__)) _U1RXInterrupt(void) 
 {
     IFS0bits.U1RXIF = 0;
+        
+     char temp_char = U1RXREG;
+    msg[char_count]= temp_char;
+    char_count++;
+    if(temp_char == '\r'){
+        if(!strcmp("alarm on\r", msg)){
+            alarm = 1;
+            servo(servo_max);
+        }
+        else if(!strcmp("alarm off\r", msg)) WriteStringToUART1("Za gasenje alarma unesite lozinku\n");
+        else if(!strcmp("1234\r", msg)){
+            alarm = 0;
+            servo(servo_min);
+        }
+        else if(!(strcmp("stats\r", msg))) writeStatsToUART1();
+        else if(!(strcmp("otvori vrata\r", msg))) servo(servo_min);
+        else if(!(strcmp("zatvori vrata\r", msg))) servo(servo_max);
+        //sprintf(msg, "");
+        int i = 0;
+        for(i=0;i<char_count;i++) msg[i] = 0;
+        WriteStringToUART1(msg);
+        char_count = 0;
+    }
    // tempRX=U1RXREG;
 
 } 
@@ -234,12 +352,33 @@ void __attribute__((__interrupt__)) _ADCInterrupt(void)
 	
 	sirovi0=ADCBUF0;//0
 	sirovi1=ADCBUF1;//1
+    sirovi2=ADCBUF2;
 
 	temp0=sirovi0;
 	temp1=sirovi1;
+    mq3_value = sirovi2;
 
     IFS0bits.ADIF = 0;
 } 
+
+void ChechMQ3(){
+    if(mq3_enable == 1){
+        if(mq3_value >= mq3_threshold){
+            mq3_current = 1;
+            mq3_enable = 0;
+            //trigger_mq3();
+        }else{
+            mq3_current = 0;
+    //    mq3_threshold = 2000;
+        }
+    }
+    if (mq3_current == 1 && mq3_last == 0){
+           mq3_last = 1;
+           trigger_mq3();      
+    }else{
+        mq3_last = mq3_current;
+    }
+}
 
 void Write_GLCD(unsigned int data)
 {
@@ -371,8 +510,11 @@ void main(void)
 	ADCON1bits.ADON=1;
     
     TRISAbits.TRISA11 = 0;
+    TRISDbits.TRISD9 = 0;
     Init_T2();
-
+    Init_T1();
+    
+    servo(servo_min);
 
     
     char buffer[30];
@@ -388,6 +530,7 @@ void main(void)
 
 	while(1)
 	{
+    ChechMQ3();
 	Touch_Panel ();
     if(aktivna_strana == tastatura){
         if(X>0 && X<128 && Y>0 && Y<64){
@@ -460,26 +603,28 @@ void main(void)
                     if(uneta_lozinka[i]!=pin[i]) ok = 0;
                 }
                 if(ok){
+                    servo(servo_min);
+                    alarm = 0;
                     WriteStringToUART1("Uneta ispravna lozinka\n");
                     char_pos=0;
                     for(i=0;i<4;i++) uneta_lozinka[i]='*';
                     GoToXY(10,1);
                     GLCD_Printf("Accepted");
-                    for(i=0;i<300;i++) Delay(1000);
+                    for(i=0;i<100;i++) Delay(1000);
                     GoToXY(10,1);
                     GLCD_Printf("        ");
-                    alarm = 0;
                 }else{
                     if(alarm_enable == 1){
                         WriteStringToUART1("ALARM: pogresna lozinka\n");
                         pin_count++;
                         alarm = 1;
+                        servo(servo_max);
                     }
                     char_pos=0;
                     for(i=0;i<4;i++) uneta_lozinka[i]='*';
                     GoToXY(10,1);
                     GLCD_Printf("Error");
-                    for(i=0;i<300;i++) Delay(1000);
+                    for(i=0;i<100;i++) Delay(1000);
                     GoToXY(10,1);
                     GLCD_Printf("        ");
                 }
